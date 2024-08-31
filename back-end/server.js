@@ -27,22 +27,18 @@ app.post('/signup', async (req, res) => {
     }
 
     try {
-        // Check if user already exists
         const userCheck = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $2', [username, email]);
         if (userCheck.rows.length > 0) {
             return res.status(400).json({ message: 'Username or email already exists' });
         }
 
-        // Hash password
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Insert user into database
         const query = 'INSERT INTO users(username, email, password) VALUES($1, $2, $3) RETURNING id';
         const values = [username, email, hashedPassword];
         const result = await pool.query(query, values);
 
-        // Create and send JWT
         const token = jwt.sign({ id: result.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
         res.status(201).json({ token });
@@ -60,7 +56,6 @@ app.post('/login', async (req, res) => {
     }
 
     try {
-        // Check if user exists
         const result = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
         if (result.rows.length === 0) {
             return res.status(400).json({ message: 'Invalid credentials' });
@@ -68,13 +63,11 @@ app.post('/login', async (req, res) => {
 
         const user = result.rows[0];
 
-        // Check password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
-        // Create and send JWT
         const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
         res.json({ token });
@@ -82,6 +75,13 @@ app.post('/login', async (req, res) => {
         console.error(err);
         res.status(500).json({ message: 'Server error' });
     }
+});
+
+app.get("/user/name", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+
+    res.send(username);
 });
 
 function authenticateToken(req, res, next) {
@@ -93,7 +93,6 @@ function authenticateToken(req, res, next) {
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) return res.sendStatus(403);
         
-        // Fetch the username from the database using the user id
         pool.query('SELECT username FROM users WHERE id = $1', [user.id], (error, results) => {
             if (error) {
                 return res.sendStatus(500);
