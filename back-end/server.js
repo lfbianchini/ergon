@@ -4,6 +4,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } = require("@aws-sdk/client-s3");
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,14 @@ const pool = new Pool({
     password: process.env.PG_PASSWORD,
     port: Number(process.env.PG_PORT),
 });
+
+const s3Client = new S3Client({
+    region: process.env.AWS_REGION,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+    }
+  });
 
 app.post('/signup', async (req, res) => {
     const { username, email, password } = req.body;
@@ -40,6 +49,18 @@ app.post('/signup', async (req, res) => {
         const result = await pool.query(query, values);
 
         const token = jwt.sign({ id: result.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+        try {
+            const params = {
+                Bucket: 'ergon-bucket',
+                Key: `users/${username}/`
+            }
+            const command = new PutObjectCommand(params);
+            const data = await s3Client.send(command);
+        } catch (err) {
+            console.error("Error", err);
+            res.status(500).send('Error uploading to S3');
+          }
 
         res.status(201).json({ token });
     } catch (err) {
@@ -83,6 +104,275 @@ app.get("/user/name", authenticateToken, async (req, res) => {
 
     res.send(username);
 });
+
+app.get("/user/directory", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    
+    const params = {
+        Bucket: 'ergon-bucket',
+        Prefix: `users/${username}/`
+    };
+
+    try {
+        const command = new ListObjectsV2Command(params);
+        const data = await s3Client.send(command);
+
+        if (!data.Contents) {
+            console.log('No directories found for user:', username);
+            return res.json([]);
+        }
+
+        const files = data.Contents.map(file => ({
+            key: file.Key,
+            size: file.Size,
+            lastModified: file.LastModified,
+            url: `https://${params.Bucket}.s3.amazonaws.com/${file.Key}`
+        }));
+        res.status(200).json(files);
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error fetching files from S3');
+    }
+});
+
+app.post("/user/directory", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.body.name;
+    
+    try {
+        const params = {
+            Bucket: 'ergon-bucket',
+            Key: `users/${username}/${directoryName}/` 
+        };
+        const command = new PutObjectCommand(params);
+        const data = await s3Client.send(command);
+        res.status(200).send('Directory created successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error creating directory in S3');
+    }
+});
+
+
+app.delete("/user/directory", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.body.name;
+    
+    try {
+        const listParams = {
+            Bucket: 'ergon-bucket',
+            Prefix: `users/${username}/${directoryName}/`
+        };
+        const listCommand = new ListObjectsV2Command(listParams);
+        const listedObjects = await s3Client.send(listCommand);
+
+        if (!listedObjects.Contents || listedObjects.Contents.length === 0) {
+            return res.status(404).send('Directory not found or already empty');
+        }
+
+        const deleteObjects = listedObjects.Contents.map(({ Key }) => ({ Key }));
+
+        const deleteParams = {
+            Bucket: 'ergon-bucket',
+            Delete: {
+                Objects: deleteObjects
+            }
+        };
+        const deleteCommand = new DeleteObjectsCommand(deleteParams);
+        await s3Client.send(deleteCommand);
+
+        res.status(200).send('Directory and its contents deleted successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error deleting directory in S3');
+    }
+});
+
+
+app.get("/user/:directory/files", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.params.directory;
+    
+    const params = {
+        Bucket: 'ergon-bucket',
+        Prefix: `users/${username}/${directoryName}/`
+    };
+
+    try {
+        const command = new ListObjectsV2Command(params);
+        const data = await s3Client.send(command);
+
+        if (!data.Contents) {
+            console.log('No files found for user:', username);
+            return res.json([]);
+        }
+
+        const files = data.Contents.map(file => ({
+            key: file.Key,
+            size: file.Size,
+            lastModified: file.LastModified,
+            url: `https://${params.Bucket}.s3.amazonaws.com/${file.Key}`
+        }));
+        res.status(200).json(files);
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error fetching files from S3');
+    }
+});
+
+
+app.delete("/user/:directory/files", authenticateToken, async (req, res) => { 
+    const deleteObjects = req.body.files.map(obj => ({ Key: obj.key }));
+
+    try {
+        const params = {
+            Bucket: 'ergon-bucket',
+            Delete: {
+                Objects: deleteObjects
+            }
+        };
+        const command = new DeleteObjectsCommand(params);
+        await s3Client.send(command);
+        res.status(200).send('Files deleted successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error deleting files from S3');
+    }
+});
+
+
+app.post("/user/:directory/rename", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const oldDirectoryName = req.params.directory;
+    const newDirectoryName = req.body.newName;
+
+    try {
+        const listParams = {
+            Bucket: 'ergon-bucket',
+            Prefix: `users/${username}/${oldDirectoryName}/`
+        };
+        const listCommand = new ListObjectsV2Command(listParams);
+        const listedObjects = await s3Client.send(listCommand);
+
+        if (!listedObjects.Contents || listedObjects.Contents.length === 0) {
+            return res.status(404).send('Directory not found or empty');
+        }
+
+        const copyPromises = listedObjects.Contents.map(({ Key }) => {
+            const newKey = Key.replace(
+                `users/${username}/${oldDirectoryName}/`,
+                `users/${username}/${newDirectoryName}/`
+            );
+
+            return s3Client.send(
+                new CopyObjectCommand({
+                    Bucket: 'ergon-bucket',
+                    CopySource: `ergon-bucket/${Key}`,
+                    Key: newKey
+                })
+            );
+        });
+
+        await Promise.all(copyPromises);
+
+        const deleteParams = {
+            Bucket: 'ergon-bucket',
+            Delete: {
+                Objects: listedObjects.Contents.map(({ Key }) => ({ Key }))
+            }
+        };
+
+        const deleteCommand = new DeleteObjectsCommand(deleteParams);
+        await s3Client.send(deleteCommand);
+
+        res.status(200).send('Directory renamed successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error renaming directory in S3');
+    }
+});
+
+app.post("/user/:directory/file/upload", authenticateToken, upload.single('file'), async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.params.directory;
+    const file = req.file; 
+
+    try {
+        const params = {
+            Bucket: 'ergon-bucket',
+            Key: `users/${username}/${directoryName}/${file.originalname}`,
+            Body: file.buffer, 
+            ContentType: file.mimetype 
+        };
+
+        const command = new PutObjectCommand(params);
+        const data = await s3Client.send(command);
+        res.status(200).send('File uploaded successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error uploading file to S3');
+    }
+});
+
+app.delete("/user/:directory/file", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.params.directory;
+    const fileName = req.body.fileName;
+
+    try {
+        const params = {
+            Bucket: 'ergon-bucket',
+            Key: `users/${username}/${directoryName}/${fileName}`
+        };
+
+        const command = new DeleteObjectCommand(params);
+        const data = await s3Client.send(command);
+        res.status(200).send('File deleted successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error deleting file from S3');
+    }
+});
+
+
+app.post("/user/:directory/file/rename", authenticateToken, async (req, res) => {
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [req.user.id]);
+    const username = userResult.rows[0].username;
+    const directoryName = req.params.directory;
+    const oldFileName = req.body.oldFileName;
+    const newFileName = req.body.newFileName;
+
+    try {
+        const oldKey = `users/${username}/${directoryName}/${oldFileName}`;
+        const newKey = `users/${username}/${directoryName}/${newFileName}`;
+
+        await s3Client.send(new CopyObjectCommand({
+            Bucket: 'ergon-bucket',
+            CopySource: `ergon-bucket/${oldKey}`,
+            Key: newKey
+        }));
+
+        await s3Client.send(new DeleteObjectCommand({
+            Bucket: 'ergon-bucket',
+            Key: oldKey
+        }));
+
+        res.status(200).send('File renamed successfully');
+    } catch (err) {
+        console.error("Error", err);
+        res.status(500).send('Error renaming file in S3');
+    }
+});
+
+
+
 
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];

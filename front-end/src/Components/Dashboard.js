@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios'; // Ensure axios is imported
 import './Dashboard.css';
 import fetchUserInfo from './api';
 
@@ -30,18 +31,52 @@ function Dashboard() {
     }
     getUserInfo();
 
-    setFiles([
-      { id: 1, name: 'math' },
-      { id: 2, name: 'cs' },
-      { id: 3, name: 'language' },
-      { id: 4, name: 'history' },
-      { id: 5, name: 'science' },
-      { id: 6, name: 'art' },
-    ]);
+    parseFilesToArray();
   }, [navigate]);
 
-  const handleCreateFile = () => {
-    console.log('new file');
+  const parseFilesToArray = async () => {
+    try {
+      const response = await axios.get('http://localhost:3000/user/directory');
+      const files = response.data;
+
+      let id = 1;
+      const spaces = files.map(file => ({
+        id: id++, // Increment id for each file
+        name: file.key.split('/').filter(Boolean).pop() // Extract the directory name
+      }));
+
+      setFiles(spaces);
+    } catch (error) {
+      console.error("Error fetching directories:", error);
+    }
+  };
+
+  const handleCreateFile = async () => {
+    try {
+      const fileName = prompt("enter the name of the new space:");
+      if (!fileName) return; 
+
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        'http://localhost:3000/user/directory',
+        { name: fileName },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      if (response.status === 200) {
+        setFiles(prevFiles => [
+          ...prevFiles,
+          { id: prevFiles.length + 1, name: fileName }
+        ]);
+        console.log('File created successfully');
+      }
+    } catch (error) {
+      console.error("Error creating file:", error);
+    }
   };
 
   const handleFileClick = (fileId) => {
